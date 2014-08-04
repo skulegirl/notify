@@ -12,6 +12,7 @@
  */
 
 define('NOTIFY_NODE_TYPE', 'notify_node_type_');
+define('NOTIFY_PROFILE2_TYPE', 'notify_profile_type_');
 
 /**
  * Implements hook_help().
@@ -519,7 +520,7 @@ function notify_user_settings_form($form, &$form_state, $arg) {
   $set = 'notify_page_nodetype';
   $form[$set] = array(
     '#type' => 'fieldset',
-    '#title' => t('Subscriptions'),
+    '#title' => t('Content Subscriptions'),
     '#collapsible' => TRUE,
     '#collapsed' => TRUE,
     '#description' => t('Tick the content types you want to subscribe to.'),
@@ -565,6 +566,51 @@ function notify_user_settings_form($form, &$form_state, $arg) {
     }
   }
 
+  if (module_exists('profile2'))
+  {
+    $set = 'notify_page_profiletype';
+    $form[$set] = array(
+      '#type' => 'fieldset',
+      '#title' => t('Profile Subscriptions'),
+      '#collapsible' => TRUE,
+      '#collapsed' => TRUE,
+      '#description' => t('Tick the profile2 types you want to subscribe to.'),
+    );
+    $alltypes = profile2_get_types();
+    $enatypes = array();
+    foreach ($alltypes as $type => $object) {
+      if ( user_access('administer notify queue', $account) 
+        || variable_get(NOTIFY_PROFILE2_TYPE . $type, 0)) {
+        $enatypes[] = $type;
+      }
+    }
+    dd($enatypes, 'profile2 enatypes');
+
+    if ($exists) {
+      // Custom subscriptions exists, use those.
+      foreach ($enatypes as $type) {
+        $field = db_query('SELECT uid FROM {notify_subscriptions} WHERE (uid = :uid) AND (type = :type)', array(':uid' => $user->uid, ':type' => 'profile2_' . $type))->fetchObject();
+        $default = $field ? TRUE : FALSE;
+        $form[$set][NOTIFY_PROFILE2_TYPE . $type] = array(
+          '#type' => 'checkbox',
+          '#title' => $type,
+          '#return_value' => 1,
+          '#default_value' => $default,
+        );
+      }
+    }
+    else {
+      // No custom subscriptions, so inherit default.
+      foreach ($enatypes as $type) {
+        $form[$set][NOTIFY_PROFILE2_TYPE . $type] = array(
+          '#type' => 'checkbox',
+          '#title' => $type,
+          '#return_value' => 1,
+          '#default_value' => TRUE,
+        );
+      }
+    }
+  }
 
   $form['uid'] = array(
     '#type' => 'value',
@@ -630,6 +676,28 @@ function notify_user_settings_form_submit($form, &$form_state) {
                'type' => $key,
              ))
              ->execute();
+         }
+      }
+    }
+    elseif (module_exists('profile2') && preg_match("/^" . NOTIFY_PROFILE2_TYPE . "/", $key)) {
+      $key = 'profile2_'.substr($key, 20);
+      $id = db_query('SELECT id FROM {notify_subscriptions} WHERE (uid = :uid) AND (type = :key)', array(':uid' => $uid, ':key' => $key))->fetchObject();
+      if ($id) {
+        $id = $id->id;
+        if (!$value) {
+          db_delete('notify_subscriptions')
+            ->condition('id', $id)
+            ->execute();
+        }
+      }
+      else {
+        if ($value) {
+          db_insert('notify_subscriptions')
+            ->fields(array(
+              'uid' => $uid,
+              'type' => $key,
+            ))
+            ->execute();
          }
       }
     }
@@ -720,6 +788,27 @@ function notify_admin_defaults($form, &$form_state) {
     );
   }
 
+  if(module_exists('profile2'))
+  {
+    $set = 'ptype';
+    $form[$set] = array(
+      '#type' => 'fieldset',
+      '#title' => t('Notification subscription by profile type'),
+      '#collapsible' => TRUE,
+      '#collapsed' => FALSE,
+      '#description' => t('Tick profile types to make available for subscription. Having nothing checked defaults to making no profile types available.'),
+    );
+
+    foreach (profile2_get_types() as $type => $object) {
+      $form[$set][NOTIFY_PROFILE2_TYPE . $type] = array(
+        '#type' => 'checkbox',
+        '#title' => $type,
+        '#return_value' => 1,
+        '#default_value' => variable_get(NOTIFY_PROFILE2_TYPE . $type, 0),
+      );
+    }
+  }
+
   $form['submit'] = array(
     '#type' => 'submit',
     '#value' => t('Save settings'),
@@ -741,6 +830,14 @@ function notify_admin_defaults_submit($form, &$form_state) {
   foreach (node_type_get_types() as $type => $object) {
     $ntype = NOTIFY_NODE_TYPE . $type;
     variable_set($ntype, $form_state['values'][$ntype]);
+  }
+
+  if(module_exists('profile2'))
+  {
+    foreach (profile2_get_types() as $type => $object) {
+      $ptype = NOTIFY_PROFILE2_TYPE . $type;
+      variable_set($ptype, $form_state['values'][$ptype]);
+    }
   }
 
   drupal_set_message(t('Notify default settings saved.'));
@@ -789,7 +886,7 @@ function notify_admin_queue($form, &$form_state) {
     '#collapsible' => TRUE,
   );
 
-  list ($np, $cp, $nn, $cn, $nu, $cu) = _notify_count();
+  list ($np, $cp, $nn, $cn, $nu, $cu, $pr) = _notify_count();
 
   $npcp = $np + $cp;
   if ($npcp) {
@@ -908,7 +1005,7 @@ function notify_admin_queue_submit($form, &$form_state) {
     variable_set('notify_num_failed', $num_fail);
   }
   else { // truncate
-    list ($res_nodes, $res_comms, $res_nopub, $res_copub, $res_nounp, $res_counp) = _notify_select_content();
+    list ($res_nodes, $res_comms, $res_nopub, $res_copub, $res_nounp, $res_counp, $res_prof) = _notify_select_content();
     foreach ($res_nopub as $row) {
       db_query('DELETE FROM {notify_unpublished_queue} WHERE cid = :cid AND nid = :nid', array(':cid' => 0, ':nid' => $row->nid));
     }
@@ -1143,6 +1240,30 @@ function _notify_content($node, $comment, $view_mode) {
 }
 
 /**
+ * Helper function to get array of tracked profile types.
+ *
+ * @param array $ptype
+ *   Reference to array with tracked types.
+ *
+ * @param bool $foop
+ *   TRUE if we return full list if empty,
+ *
+ */
+function _notify_get_profile_types(&$ptype, $foop) {
+  $ptype = array();
+  foreach (profile2_get_types() as $type => $obj) {
+    if (variable_get(NOTIFY_PROFILE2_TYPE . $type, 0)) {
+      $ptype[] = $type;
+    }
+  }
+  if ($foop && count($ptype) < 1) {
+    foreach (profile2_get_types() as $type => $obj) {
+      $ptype[] = $type;
+    }
+  }
+}
+
+/**
  * Helper function to get array of tracked types.
  *
  * @param array $ntype
@@ -1171,14 +1292,15 @@ function _notify_get_content_types(&$ntype, $foop) {
  * Helper function to set up query objects to select content for
  * counting and sending.
  *
- * Return array has six values:
+ * Return array has seven values:
  * - ordinary published entities: nodes, comments;
  * - in unpublished queue:
  *     published nodes, published comments,
  *     unpublished nodes, unpublished comments,
+ * - profile entities
  *
  * @return array
- *   res_nodes, res_comms, res_nopub, res_copub, res_nounp, res_counp
+ *   res_nodes, res_comms, res_nopub, res_copub, res_nounp, res_counp, res_prof
  */
 function _notify_select_content() {
   $since = variable_get('notify_send_last', 0);
@@ -1276,19 +1398,49 @@ function _notify_select_content() {
     $res_comms = $res_copub = $res_counp = NULL;
   }
 
-  return array($res_nodes, $res_comms, $res_nopub, $res_copub, $res_nounp, $res_counp);
+  if(module_exists('profile2'))
+  {
+    $all = profile2_get_types();
+    $ptype = array();
+    foreach ($all as $obj) {
+      $ptype[] = $obj->type;
+    }
+
+    // Build query object to fetch new nodes.
+    $q = db_select('profile', 'p');
+    $q->fields('p', array('pid'));
+    if (count($ptype) >= 1) {
+      $q->condition('p.type', $ptype, 'IN');
+    }
+    if (variable_get('notify_include_updates', 1)) {
+      $q->condition(db_or()->condition(db_and()->condition('p.created', $since, '>')->condition('p.created', $send_start, '<='))
+                           ->condition(db_and()->condition('p.changed', $since, '>')->condition('p.changed', $send_start, '<=')));
+    }
+    else {
+      $q->condition('p.created', $since, '>');
+      $q->condition('p.created', $send_start, '<=');
+    }
+    $q->orderBy('p.created', 'asc');
+    $res_prof = $q->execute();
+  }
+  else {
+    $res_prof = NULL;
+  }
+
+  return array($res_nodes, $res_comms, $res_nopub, $res_copub, $res_nounp, $res_counp, $res_prof);
 }
 
 function _notify_count() {
-  $np = $cp = $nn = $cn = $bu = $cu = 0; // Just in case.
-  list ($res_nodes, $res_comms, $res_nopub, $res_copub, $res_nounp, $res_counp) = _notify_select_content();
+  $np = $cp = $nn = $cn = $bu = $cu = $pr = 0; // Just in case.
+  list ($res_nodes, $res_comms, $res_nopub, $res_copub, $res_nounp, $res_counp, $res_prof) = _notify_select_content();
   if ($res_nodes) $np = $res_nodes->rowCount();
   if ($res_comms) $cp = $res_comms->rowCount();
   if ($res_nopub) $nn = $res_nopub->rowCount();
   if ($res_copub) $cn = $res_copub->rowCount();
   if ($res_nounp) $nu = $res_nounp->rowCount();
   if ($res_counp) $cu = $res_counp->rowCount();
-  return array($np, $cp, $nn, $cn, $nu, $cu);
+  if ($res_prof)  $pr = $res_prof->rowCount();
+  return array($np, $cp, $nn, $cn, $nu, $cu, $pr);
 }
 
 /**
@@ -1301,16 +1453,21 @@ function _notify_send() {
   $send_start = variable_get('notify_send_start', 0);
   $num_sent = 0;
   $num_fail = 0;
-  list ($res_nodes, $res_comms, $res_nopub, $res_copub, $res_nounp, $res_counp) = _notify_select_content();
+  list ($res_nodes, $res_comms, $res_nopub, $res_copub, $res_nounp, $res_counp, $res_prof) = _notify_select_content();
 
   _notify_get_content_types($defaultlist, TRUE);
 
   // Get the nodes and comments queued.
   $count = 0;
-  $nodes = $comments = array();
+  $nodes = $comments = $profiles = array();
   // Ordinary nodes
   foreach ($res_nodes as $row) {
     $nodes[$row->nid] = node_load($row->nid);
+    $count++;
+  }
+  // Ordinary profiless
+  foreach ($res_prof as $row) {
+    $profiles[$row->pid] = profile2_load($row->pid);
     $count++;
   }
   // Ordinary comments
@@ -1375,7 +1532,7 @@ function _notify_send() {
         break;
       }
       $userobj = user_load($userrow['uid']);
-      $node_body = $comment_body = '';
+      $node_body = $comment_body = $profile_body = '';
 
       // Consider new node content if user has permissions and nodes are ready.
       // $userrow['node']: user subscribes to nodes.
@@ -1390,22 +1547,21 @@ function _notify_send() {
           if (!user_access('administer nodes', $userobj) && NODE_NOT_PUBLISHED == $node->status) {
             continue;
           }
-	  if (!user_access('administer nodes', $userobj) && !in_array($node->type, $defaultlist)) {
+          if (!user_access('administer nodes', $userobj) && !in_array($node->type, $defaultlist)) {
             continue;
           }
-	  if (!variable_get('notify_unpublished', 1) && NODE_NOT_PUBLISHED == $node->status) {
+          if (!variable_get('notify_unpublished', 1) && NODE_NOT_PUBLISHED == $node->status) {
             continue;
           }
 
-	  if (_notify_user_has_subscriptions($userrow['uid'])) {
-	    // Custom subscriptions exists, use those.
-	    $field = db_query('SELECT uid FROM {notify_subscriptions} WHERE (uid = :uid) AND (type = :type)', array(':uid' => $userrow['uid'], ':type' => $node->type))->fetchObject();
-	    $default = $field ? TRUE : FALSE;
-	    if (!$default) {
-              continue;
-	    }
+          if (_notify_user_has_subscriptions($userrow['uid'])) {
+            // Custom subscriptions exists, use those.
+            $field = db_query('SELECT uid FROM {notify_subscriptions} WHERE (uid = :uid) AND (type = :type)', array(':uid' => $userrow['uid'], ':type' => $node->type))->fetchObject();
+            $default = $field ? TRUE : FALSE;
+            if (!$default) {
+                    continue;
+            }
           }
-
 
           $node_revs_list = node_revision_list($node);
           $nrl_vals = array_values($node_revs_list);
@@ -1521,7 +1677,56 @@ function _notify_send() {
         }
       }
 
-      $body = $node_body . $comment_body;
+      // Consider new profile content if user has permissions and profiles are ready.
+      // $userrow['node']: user subscribes to content (which includes both nodes and profiles)
+      // user_access('view any $type profile', $userobj): user allowed to view publ
+      // count($nodes): nodes are queued
+      if ($userrow['node'] && count($profiles)) {
+
+        $profile_count = 0;
+        // Look at the profile
+        _notify_get_profile_types($defaultlist, TRUE);
+        foreach ($profiles as $profile) {
+          // Skip to next if user is not allowed to view this node.
+          if (!user_access('administer profiles', $userobj) && !in_array($node->type, $defaultlist)) {
+            continue;
+          }
+
+          if (_notify_user_has_subscriptions($userrow['uid'])) {
+            // Custom subscriptions exists, use those.
+            $field = db_query('SELECT uid FROM {notify_subscriptions} WHERE (uid = :uid) AND (type = :type)', array(':uid' => $userrow['uid'], ':type' => 'profile2_'.$profile->type))->fetchObject();
+            $default = $field ? TRUE : FALSE;
+            if (!$default) {
+                    continue;
+            }
+          }
+
+          $node_revs_list = node_revision_list($node);
+          $nrl_vals = array_values($node_revs_list);
+          $vers = array_shift($nrl_vals);
+
+          if ($profilee_count > 0) {
+            $profile_body .= $mini_separator;
+          }
+          $profile_body .= ++$profile_count . '.' . t('!type by !author', array(
+            '!type' => $profile->type,
+            '!author' => format_username(user_load($profile->uid)), 
+          )) . "\n";
+
+          $profile_body .= '   [ ' . url('user/' . $profile->uid, array(
+            'absolute' => TRUE,
+          )) . " ]\n";
+        }
+
+        // Prepend node e-mail header as long as user could access at
+        // least one node.
+        if ($profile_count > 0) {
+          $profile_body = $separator . t('Recent profiles - !count', array(
+            '!count' => format_plural($profile_count, '1 new profile', '@count new profiles'),
+          )) . "\n" . $separator . $profile_body;
+        }
+      }
+      $body = $node_body . $comment_body . $profile_body;
 
       //if (variable_get('notify_unpublished', 1)) {}
 
@@ -1550,7 +1755,7 @@ function _notify_send() {
     $send_start = variable_get('notify_send_start', 0);	
     variable_set('notify_send_last', $send_start);
     variable_set('notify_cron_next', 0); // Force reset
-    list ($res_nodes, $res_comms, $res_nopub, $res_copub, $res_nounp, $res_counp) = _notify_select_content();
+    list ($res_nodes, $res_comms, $res_nopub, $res_copub, $res_nounp, $res_counp, $res_prof) = _notify_select_content();
     foreach ($res_nopub as $row) {
       db_query('DELETE FROM {notify_unpublished_queue} WHERE cid = :cid AND nid = :nid', array(':cid' => 0, ':nid' => $row->nid));
     }
