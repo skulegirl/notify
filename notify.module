@@ -1705,7 +1705,7 @@ function _notify_send() {
           $nrl_vals = array_values($node_revs_list);
           $vers = array_shift($nrl_vals);
 
-          if ($profilee_count > 0) {
+          if ($profile_count > 0) {
             $profile_body .= $mini_separator;
           }
           $profile_body .= ++$profile_count . '.' . t('!type by !author', array(
