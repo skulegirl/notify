@@ -584,7 +584,6 @@ function notify_user_settings_form($form, &$form_state, $arg) {
         $enatypes[] = $type;
       }
     }
-    dd($enatypes, 'profile2 enatypes');
 
     if ($exists) {
       // Custom subscriptions exists, use those.
